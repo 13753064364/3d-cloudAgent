@@ -39,6 +39,36 @@
   white-space: nowrap;
 }
 
+.cameraSwitch {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.cameraButton,
+.activeCameraButton {
+  border: 1px solid rgba(74, 163, 223, 0.45);
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: rgba(7, 24, 44, 0.85);
+  color: #d3f3ff;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.cameraButton:hover {
+  background: rgba(24, 54, 86, 0.92);
+}
+
+.activeCameraButton {
+  border-color: rgba(127, 228, 255, 0.95);
+  background: rgba(40, 113, 168, 0.65);
+  color: #f2fbff;
+  box-shadow: 0 0 14px rgba(84, 200, 255, 0.35);
+}
+
 .dot {
   width: 10px;
   height: 10px;
@@ -163,6 +193,16 @@
   gap: 8px;
   font-size: 13px;
   color: rgba(214, 239, 255, 0.95);
+}
+
+.effectHint {
+  margin-top: 12px;
+  border: 1px solid rgba(255, 183, 113, 0.42);
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 12px;
+  color: #ffe6bc;
+  background: rgba(76, 38, 14, 0.32);
 }
 
 @media (max-width: 1200px) {
