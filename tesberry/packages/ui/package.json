@@ -1,0 +1,29 @@
+{
+  "name": "@tesberry/ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 8089",
+    "build": "next build",
+    "start": "next start -p 8089",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@fontsource/montserrat": "^4.5.12",
+    "jmuxer": "^2.0.4",
+    "next": "12.2.5",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-modal": "^3.15.1"
+  },
+  "devDependencies": {
+    "@types/jmuxer": "^2.0.3",
+    "@types/node": "18.7.11",
+    "@types/react": "18.0.17",
+    "@types/react-dom": "18.0.6",
+    "@types/react-modal": "^3.13.1",
+    "eslint": "8.22.0",
+    "eslint-config-next": "12.2.5",
+    "typescript": "4.7.4"
+  }
+}

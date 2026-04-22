@@ -1,0 +1,7 @@
+paho-mqtt
+asyncio
+can
+cantools
+jsonpickle
+python-can == 4.0.0
+python-dotenv

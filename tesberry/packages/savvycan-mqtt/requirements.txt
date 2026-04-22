@@ -1,0 +1,2 @@
+paho-mqtt
+python-can == 4.0.0
