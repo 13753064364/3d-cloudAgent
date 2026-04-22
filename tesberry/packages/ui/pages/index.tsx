@@ -21,34 +21,59 @@ type SmokeTrail = {
 }
 
 const radarTracks = [
-  { name: 'EAGLE-01', status: '高空压制', confidence: '99%' },
-  { name: 'HAWK-12', status: '机动截获', confidence: '95%' },
-  { name: 'ORBIT-07', status: '电子侦察', confidence: '96%' },
-  { name: 'GUARD-22', status: '末段拦截', confidence: '97%' },
+  { name: 'EAGLE-01', status: '森林上空巡航', confidence: '99%' },
+  { name: 'HAWK-12', status: '海岸线压制', confidence: '96%' },
+  { name: 'ORBIT-07', status: '高空云层侦察', confidence: '95%' },
+  { name: 'GUARD-22', status: '末段拦截', confidence: '98%' },
 ]
 
 const battleMetrics = [
-  { label: '地球纹理精度', value: '8K' },
+  { label: '地形覆盖', value: '森林/海域/高空云' },
+  { label: '导弹模型', value: '高精度 GLB' },
   { label: '目标锁定', value: '43 / 45' },
-  { label: '链路时延', value: '24 ms' },
   { label: '实时追踪', value: '3 视角' },
 ]
 
 const strategicEvents = [
-  '已切换真实飞机与导弹模型，轨迹姿态由曲线切线实时驱动。',
-  '地球使用 8K 日照/夜光/云层纹理，并开启大气辉光外壳。',
+  '已切换地表多地形战场：森林、海面与高空云层同步渲染。',
+  '导弹与飞机使用真实 GLB 模型，轨迹姿态由曲线切线驱动。',
   '导弹末段制导触发爆闪、冲击环和火花散射效果。',
 ]
 
-const latLonToVector3 = (radius: number, latitude: number, longitude: number) => {
-  const phi = (90 - latitude) * (Math.PI / 180)
-  const theta = (longitude + 180) * (Math.PI / 180)
+const terrainHeightAt = (x: number, z: number) => {
+  const rolling = Math.sin(x * 0.07) * 2.1 + Math.cos(z * 0.06) * 1.6
+  const details = Math.sin((x + z) * 0.12) * 0.85 + Math.cos((x - z) * 0.08) * 0.65
+  return rolling + details
+}
 
-  return new THREE.Vector3(
-    -(radius * Math.sin(phi) * Math.cos(theta)),
-    radius * Math.cos(phi),
-    radius * Math.sin(phi) * Math.sin(theta)
+const createSoftCircleTexture = (size: number, color: string, alphaScale: number) => {
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return null
+  }
+
+  const gradient = context.createRadialGradient(
+    size * 0.5,
+    size * 0.5,
+    size * 0.1,
+    size * 0.5,
+    size * 0.5,
+    size * 0.5
   )
+  gradient.addColorStop(0, `${color}${Math.round(alphaScale * 255).toString(16).padStart(2, '0')}`)
+  gradient.addColorStop(0.5, `${color}${Math.round(alphaScale * 125).toString(16).padStart(2, '0')}`)
+  gradient.addColorStop(1, `${color}00`)
+
+  context.clearRect(0, 0, size, size)
+  context.fillStyle = gradient
+  context.fillRect(0, 0, size, size)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  return texture
 }
 
 const createFallbackAircraft = (color: number) => {
@@ -86,7 +111,13 @@ const createFallbackMissile = () => {
   return missile
 }
 
-const createSmokeTrail = (scene: any, color: number, size: number, maxPoints: number): SmokeTrail => {
+const createSmokeTrail = (
+  scene: any,
+  color: number,
+  size: number,
+  maxPoints: number,
+  smokeMap: any
+): SmokeTrail => {
   const geometry = new THREE.BufferGeometry()
   const buffer = new Float32Array(maxPoints * 3)
   for (let index = 0; index < buffer.length; index += 1) {
@@ -96,10 +127,13 @@ const createSmokeTrail = (scene: any, color: number, size: number, maxPoints: nu
 
   const material = new THREE.PointsMaterial({
     color,
+    map: smokeMap || null,
     size,
     transparent: true,
     opacity: 0.52,
     depthWrite: false,
+    alphaTest: 0.03,
+    blending: THREE.NormalBlending,
   })
 
   const points = new THREE.Points(geometry, material)
@@ -165,15 +199,16 @@ const Home: NextPage = () => {
 
     let disposed = false
     const scene = new THREE.Scene()
-    scene.fog = new THREE.Fog(0x030914, 15, 40)
+    scene.background = new THREE.Color(0x8aaccc)
+    scene.fog = new THREE.Fog(0x8ea7bb, 70, 210)
 
     const camera = new THREE.PerspectiveCamera(
       45,
       mountNode.clientWidth / mountNode.clientHeight,
       0.1,
-      100
+      500
     )
-    camera.position.set(0, 2.8, 9.4)
+    camera.position.set(0, 32, 78)
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -183,111 +218,157 @@ const Home: NextPage = () => {
     renderer.toneMappingExposure = 1.18
     mountNode.appendChild(renderer.domElement)
 
-    const ambientLight = new THREE.AmbientLight(0x87b7ff, 0.55)
-    const sunlight = new THREE.DirectionalLight(0xffffff, 1.3)
-    sunlight.position.set(6, 3.5, 5)
-    const rimLight = new THREE.DirectionalLight(0x7ec4ff, 0.55)
-    rimLight.position.set(-4, -2, -4)
-    const warningLight = new THREE.PointLight(0xff7d5f, 0.42, 45)
-    warningLight.position.set(3, -2, 3)
-    scene.add(ambientLight, sunlight, rimLight, warningLight)
+    const hemiLight = new THREE.HemisphereLight(0x9cc5ea, 0x5d6f55, 0.88)
+    const sunLight = new THREE.DirectionalLight(0xfff3da, 1.25)
+    sunLight.position.set(36, 52, 18)
+    const fillLight = new THREE.DirectionalLight(0xb9d8ff, 0.35)
+    fillLight.position.set(-30, 18, -26)
+    const warningLight = new THREE.PointLight(0xff8459, 0.65, 130)
+    warningLight.position.set(12, 28, 16)
+    scene.add(hemiLight, sunLight, fillLight, warningLight)
 
     const textureLoader = new THREE.TextureLoader()
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy()
-    const earthDay = textureLoader.load('/textures/earth_day_8k.jpg')
-    const earthNight = textureLoader.load('/textures/earth_night_8k.jpg')
-    const earthClouds = textureLoader.load('/textures/earth_clouds_8k.jpg')
+    const terrainTexture = textureLoader.load('/textures/terrain_grass.jpg')
+    const waterNormals = textureLoader.load('/textures/water_normals.jpg')
 
-    ;[earthDay, earthNight, earthClouds].forEach((texture) => {
+    ;[terrainTexture, waterNormals].forEach((texture) => {
       texture.anisotropy = maxAnisotropy
       texture.colorSpace = THREE.SRGBColorSpace
+      texture.wrapS = THREE.RepeatWrapping
+      texture.wrapT = THREE.RepeatWrapping
     })
+    terrainTexture.repeat.set(24, 24)
+    waterNormals.repeat.set(8, 8)
 
-    const globe = new THREE.Mesh(
-      new THREE.SphereGeometry(2.2, 200, 200),
-      new THREE.MeshPhongMaterial({
-        map: earthDay,
-        bumpMap: earthDay,
-        bumpScale: 0.05,
-        specularMap: earthDay,
-        specular: new THREE.Color(0x24303d),
-        emissiveMap: earthNight,
-        emissive: new THREE.Color(0x5f6f93),
-        emissiveIntensity: 0.26,
-        shininess: 20,
-      })
-    )
-    scene.add(globe)
-
-    const cloudLayer = new THREE.Mesh(
-      new THREE.SphereGeometry(2.235, 160, 160),
-      new THREE.MeshPhongMaterial({
-        map: earthClouds,
-        transparent: true,
-        opacity: 0.34,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      })
-    )
-    scene.add(cloudLayer)
-
-    const atmosphereMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        glowColor: { value: new THREE.Color(0x46a8ff) },
-        viewVector: { value: new THREE.Vector3(0, 0, 8) },
-      },
-      vertexShader: `
-        varying vec3 vNormal;
-        void main() {
-          vNormal = normalize(normalMatrix * normal);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 glowColor;
-        uniform vec3 viewVector;
-        varying vec3 vNormal;
-        void main() {
-          float intensity = pow(0.75 - dot(vNormal, normalize(viewVector)), 3.8);
-          gl_FragColor = vec4(glowColor, 1.0) * intensity;
-        }
-      `,
-      side: THREE.BackSide,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(2.34, 140, 140), atmosphereMaterial)
-    scene.add(atmosphere)
-
-    const starGeometry = new THREE.BufferGeometry()
-    const starVertices = new Float32Array(4200)
-    for (let index = 0; index < starVertices.length; index += 1) {
-      starVertices[index] = THREE.MathUtils.randFloatSpread(66)
+    const terrainGeometry = new THREE.PlaneGeometry(190, 190, 220, 220)
+    const terrainPosition = terrainGeometry.attributes.position as THREE.BufferAttribute
+    for (let index = 0; index < terrainPosition.count; index += 1) {
+      const x = terrainPosition.getX(index)
+      const z = terrainPosition.getY(index)
+      terrainPosition.setZ(index, terrainHeightAt(x, z))
     }
-    starGeometry.setAttribute('position', new THREE.BufferAttribute(starVertices, 3))
-    const stars = new THREE.Points(
-      starGeometry,
-      new THREE.PointsMaterial({
-        color: 0xa4d4ff,
-        size: 0.03,
-        transparent: true,
-        opacity: 0.8,
+    terrainGeometry.computeVertexNormals()
+    terrainGeometry.rotateX(-Math.PI / 2)
+
+    const terrain = new THREE.Mesh(
+      terrainGeometry,
+      new THREE.MeshStandardMaterial({
+        map: terrainTexture,
+        roughness: 0.95,
+        metalness: 0.05,
       })
     )
-    scene.add(stars)
+    terrain.position.y = -6
+    scene.add(terrain)
+
+    const sea = new THREE.Mesh(
+      new THREE.PlaneGeometry(110, 86, 1, 1),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x2b668f,
+        normalMap: waterNormals,
+        normalScale: new THREE.Vector2(0.8, 0.8),
+        roughness: 0.16,
+        metalness: 0.1,
+        clearcoat: 0.5,
+        transparent: true,
+        opacity: 0.78,
+      })
+    )
+    sea.rotation.x = -Math.PI / 2
+    sea.position.set(48, -4.8, -22)
+    scene.add(sea)
+
+    const treeTrunkGeometry = new THREE.CylinderGeometry(0.14, 0.19, 2.1, 8)
+    const treeTrunkMaterial = new THREE.MeshStandardMaterial({
+      color: 0x5f4028,
+      roughness: 0.92,
+      metalness: 0.02,
+    })
+    const treeCrownGeometry = new THREE.ConeGeometry(0.95, 2.8, 7)
+    const treeCrownMaterial = new THREE.MeshStandardMaterial({
+      color: 0x2f6f3b,
+      roughness: 0.88,
+      metalness: 0.03,
+    })
+    const treeCount = 360
+    const trunkInstances = new THREE.InstancedMesh(treeTrunkGeometry, treeTrunkMaterial, treeCount)
+    const crownInstances = new THREE.InstancedMesh(treeCrownGeometry, treeCrownMaterial, treeCount)
+    const tempMatrix = new THREE.Matrix4()
+    const tempPosition = new THREE.Vector3()
+    const tempQuaternion = new THREE.Quaternion()
+    const tempScale = new THREE.Vector3()
+    for (let index = 0; index < treeCount; index += 1) {
+      const x = THREE.MathUtils.randFloatSpread(170)
+      const z = THREE.MathUtils.randFloatSpread(170)
+      // 海面区域不种树，保留海湾地形。
+      if (x > 10 && z < 28) {
+        const fallbackX = x - 42
+        const fallbackZ = z + 34
+        tempPosition.set(fallbackX, terrainHeightAt(fallbackX, fallbackZ) - 6 + 1, fallbackZ)
+      } else {
+        tempPosition.set(x, terrainHeightAt(x, z) - 6 + 1, z)
+      }
+
+      tempQuaternion.setFromEuler(new THREE.Euler(0, Math.random() * Math.PI * 2, 0))
+      tempScale.setScalar(0.8 + Math.random() * 1.3)
+      tempMatrix.compose(tempPosition, tempQuaternion, tempScale)
+      trunkInstances.setMatrixAt(index, tempMatrix)
+
+      tempPosition.y += 1.95
+      tempScale.setScalar(0.7 + Math.random() * 0.8)
+      tempMatrix.compose(tempPosition, tempQuaternion, tempScale)
+      crownInstances.setMatrixAt(index, tempMatrix)
+    }
+    scene.add(trunkInstances, crownInstances)
+
+    const cloudTexture = createSoftCircleTexture(220, '#ffffff', 0.78)
+    const clouds: Array<{ sprite: any; speed: number }> = []
+    for (let index = 0; index < 34; index += 1) {
+      const cloud = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: cloudTexture || null,
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.35 + Math.random() * 0.2,
+          depthWrite: false,
+        })
+      )
+      cloud.position.set(THREE.MathUtils.randFloatSpread(200), 24 + Math.random() * 12, THREE.MathUtils.randFloatSpread(200))
+      const cloudSize = 9 + Math.random() * 15
+      cloud.scale.set(cloudSize * 1.8, cloudSize, 1)
+      scene.add(cloud)
+      clouds.push({
+        sprite: cloud,
+        speed: 0.03 + Math.random() * 0.05,
+      })
+    }
+
+    const cloudBand = new THREE.Mesh(
+      new THREE.PlaneGeometry(220, 220, 1, 1),
+      new THREE.MeshBasicMaterial({
+        color: 0xe9f4ff,
+        transparent: true,
+        opacity: 0.18,
+        depthWrite: false,
+      })
+    )
+    cloudBand.rotation.x = -Math.PI / 2
+    cloudBand.position.y = 31
+    scene.add(cloudBand)
 
     const targetCoordinates = [
-      { latitude: 40.2, longitude: -74.5 },
-      { latitude: 31.5, longitude: 121.6 },
-      { latitude: 28.8, longitude: 44.2 },
-      { latitude: -33.7, longitude: 151.3 },
-      { latitude: 47.2, longitude: 17.8 },
+      new THREE.Vector3(-62, 16, -18),
+      new THREE.Vector3(-28, 22, 24),
+      new THREE.Vector3(6, 19, 10),
+      new THREE.Vector3(38, 21, -14),
+      new THREE.Vector3(66, 17, 21),
+      new THREE.Vector3(20, 16, 46),
+      new THREE.Vector3(-36, 20, 30),
     ]
 
     const targets: any[] = []
     targetCoordinates.forEach((target, index) => {
-      const position = latLonToVector3(2.27, target.latitude, target.longitude)
       const marker = new THREE.Mesh(
         new THREE.SphereGeometry(0.055, 18, 18),
         new THREE.MeshStandardMaterial({
@@ -296,29 +377,21 @@ const Home: NextPage = () => {
           emissiveIntensity: 1.1,
         })
       )
-      marker.position.copy(position)
+      marker.position.copy(target)
       scene.add(marker)
       targets.push(marker)
     })
 
-    const attackerPath = new THREE.CatmullRomCurve3(
-      [
-        latLonToVector3(2.31, 22.1, 110.1),
-        latLonToVector3(2.38, 29.6, 90.4),
-        latLonToVector3(2.34, 34.4, 58.5),
-        latLonToVector3(2.29, 26.1, 24.2),
-        latLonToVector3(2.31, 20.6, 69.7),
-      ],
-      true
-    )
-
+    const attackerPath = new THREE.CatmullRomCurve3(targetCoordinates, true)
     const targetPath = new THREE.CatmullRomCurve3(
       [
-        latLonToVector3(2.29, 24.8, 130.3),
-        latLonToVector3(2.25, 30.3, 101.6),
-        latLonToVector3(2.33, 33.5, 63.8),
-        latLonToVector3(2.3, 28.8, 39.1),
-        latLonToVector3(2.28, 23.4, 76.2),
+        new THREE.Vector3(-58, 19, 52),
+        new THREE.Vector3(-20, 24, 26),
+        new THREE.Vector3(12, 18, 2),
+        new THREE.Vector3(44, 22, 28),
+        new THREE.Vector3(70, 16, -6),
+        new THREE.Vector3(22, 20, -32),
+        new THREE.Vector3(-26, 17, -40),
       ],
       true
     )
@@ -357,9 +430,10 @@ const Home: NextPage = () => {
     targetBeacon.position.set(0, 0.22, 0)
     targetJet.add(targetBeacon)
 
-    const attackerSmoke = createSmokeTrail(scene, 0xd8e2ea, 0.056, 96)
-    const targetSmoke = createSmokeTrail(scene, 0xe5cfd4, 0.052, 96)
-    const missileSmoke = createSmokeTrail(scene, 0xdbe2e9, 0.048, 84)
+    const smokeMap = createSoftCircleTexture(120, '#f6f8fb', 0.9)
+    const attackerSmoke = createSmokeTrail(scene, 0xd8e2ea, 0.9, 96, smokeMap)
+    const targetSmoke = createSmokeTrail(scene, 0xe5cfd4, 0.85, 96, smokeMap)
+    const missileSmoke = createSmokeTrail(scene, 0xdbe2e9, 0.75, 84, smokeMap)
 
     const missileTrack = new THREE.Line(
       new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
@@ -421,8 +495,8 @@ const Home: NextPage = () => {
       })
     }
 
-    const desiredCameraPosition = new THREE.Vector3(0, 2.8, 9.4)
-    const desiredLookAt = new THREE.Vector3(0, 0, 0)
+    const desiredCameraPosition = new THREE.Vector3(0, 32, 78)
+    const desiredLookAt = new THREE.Vector3(0, 6, 0)
     let attackerProgress = 0.11
     let targetProgress = 0.56
     let missileProgress = 0
@@ -483,14 +557,18 @@ const Home: NextPage = () => {
             }
             const attackerModel = gltf.scene
             normalizeModelMaterials(attackerModel)
-            attackerModel.scale.setScalar(0.0062)
+            const attackerBox = new THREE.Box3().setFromObject(attackerModel)
+            const attackerSize = new THREE.Vector3()
+            attackerBox.getSize(attackerSize)
+            const aircraftScale = 3.8 / Math.max(attackerSize.x, attackerSize.y, attackerSize.z, 1)
+            attackerModel.scale.setScalar(aircraftScale)
             attackerModel.rotation.set(Math.PI / 2, Math.PI, 0)
             clearAnchor(attackerVisual)
             attackerVisual.add(attackerModel)
 
             const targetModel = gltf.scene.clone(true)
             normalizeModelMaterials(targetModel)
-            targetModel.scale.setScalar(0.0062)
+            targetModel.scale.setScalar(aircraftScale)
             targetModel.rotation.set(Math.PI / 2, Math.PI, 0)
             clearAnchor(targetVisual)
             targetVisual.add(targetModel)
@@ -507,7 +585,11 @@ const Home: NextPage = () => {
             }
             const missileModel = gltf.scene
             normalizeModelMaterials(missileModel)
-            missileModel.scale.setScalar(0.0029)
+            const missileBox = new THREE.Box3().setFromObject(missileModel)
+            const missileSize = new THREE.Vector3()
+            missileBox.getSize(missileSize)
+            const missileScale = 2.8 / Math.max(missileSize.x, missileSize.y, missileSize.z, 1)
+            missileModel.scale.setScalar(missileScale)
             missileModel.rotation.set(Math.PI / 2, 0, Math.PI)
             clearAnchor(missileVisual)
             missileVisual.add(missileModel)
@@ -547,9 +629,15 @@ const Home: NextPage = () => {
     const animate = () => {
       animationFrame = window.requestAnimationFrame(animate)
 
-      globe.rotation.y += 0.0009
-      cloudLayer.rotation.y += 0.00135
-      stars.rotation.y += 0.00015
+      waterNormals.offset.x += 0.00055
+      waterNormals.offset.y += 0.00035
+      cloudBand.rotation.z += 0.0001
+      clouds.forEach((cloud) => {
+        cloud.sprite.position.x += cloud.speed
+        if (cloud.sprite.position.x > 112) {
+          cloud.sprite.position.x = -112
+        }
+      })
 
       routeMarkers.forEach((flight) => {
         flight.progress = (flight.progress + flight.speed) % 1
@@ -654,28 +742,27 @@ const Home: NextPage = () => {
         target.scale.setScalar(pulse)
       })
 
-      atmosphereMaterial.uniforms.viewVector.value.copy(camera.position)
       const mode = cameraModeRef.current
       if (mode === 'strategic') {
-        desiredCameraPosition.set(0, 2.8, 9.4)
-        desiredLookAt.set(0, 0.05, 0)
+        desiredCameraPosition.set(0, 34, 82)
+        desiredLookAt.set(0, 7, 0)
       } else if (mode === 'aircraft') {
         desiredCameraPosition
           .copy(attackerJet.position)
-          .add(attackerTangent.clone().multiplyScalar(-1.12))
-          .add(new THREE.Vector3(0, 0.45, 0))
-        desiredLookAt.copy(attackerJet.position).add(attackerTangent.clone().multiplyScalar(1.8))
+          .add(attackerTangent.clone().multiplyScalar(-8))
+          .add(new THREE.Vector3(0, 2.4, 0))
+        desiredLookAt.copy(attackerJet.position).add(attackerTangent.clone().multiplyScalar(12))
       } else if (missileActive) {
         desiredCameraPosition
           .copy(missile.position)
-          .add(missileTangent.clone().multiplyScalar(-0.42))
-          .add(new THREE.Vector3(0, 0.24, 0))
-        desiredLookAt.copy(missile.position).add(missileTangent.clone().multiplyScalar(1.2))
+          .add(missileTangent.clone().multiplyScalar(-4))
+          .add(new THREE.Vector3(0, 1.2, 0))
+        desiredLookAt.copy(missile.position).add(missileTangent.clone().multiplyScalar(8))
       } else {
         desiredCameraPosition
           .copy(attackerJet.position)
-          .add(attackerTangent.clone().multiplyScalar(-1.18))
-          .add(new THREE.Vector3(0, 0.45, 0))
+          .add(attackerTangent.clone().multiplyScalar(-9))
+          .add(new THREE.Vector3(0, 2.4, 0))
         desiredLookAt.copy(targetJet.position)
       }
 
@@ -706,6 +793,12 @@ const Home: NextPage = () => {
           }
         }
       })
+      if (cloudTexture) {
+        cloudTexture.dispose()
+      }
+      if (smokeMap) {
+        smokeMap.dispose()
+      }
       renderer.dispose()
       mountNode.removeChild(renderer.domElement)
     }
@@ -768,10 +861,10 @@ const Home: NextPage = () => {
           <section className={styles.sceneWrap}>
             <div ref={sceneRef} className={styles.scene} />
             <div className={styles.legend}>
-              <span>蓝色: 我方真实飞机模型航迹</span>
-              <span>红色: 目标飞机航迹</span>
-              <span>黄色: 导弹拦截路径</span>
-              <span>灰白: 飞机/导弹尾烟</span>
+              <span>绿色地表: 森林丘陵</span>
+              <span>蓝色区域: 海面地形</span>
+              <span>白色云层: 高空云海</span>
+              <span>灰白粒子: 飞机与导弹尾烟</span>
             </div>
           </section>
 
@@ -792,7 +885,7 @@ const Home: NextPage = () => {
               ))}
             </ul>
             <div className={styles.effectHint}>
-              已启用：真实模型 / 8K 地球细节 / 大气辉光 / 命中特效
+              已启用：地表多地形 / 真实导弹模型 / 高空云层 / 命中特效
             </div>
           </aside>
         </div>
