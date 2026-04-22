@@ -184,6 +184,8 @@ const orientObject = (object: any, position: any, tangent: any) => {
 
 const Home: NextPage = () => {
   const [cameraMode, setCameraMode] = useState<CameraMode>('strategic')
+  const [aircraftModelReady, setAircraftModelReady] = useState(false)
+  const [missileModelReady, setMissileModelReady] = useState(false)
   const sceneRef = useRef<HTMLDivElement>(null)
   const cameraModeRef = useRef<CameraMode>('strategic')
 
@@ -242,7 +244,7 @@ const Home: NextPage = () => {
     waterNormals.repeat.set(8, 8)
 
     const terrainGeometry = new THREE.PlaneGeometry(190, 190, 220, 220)
-    const terrainPosition = terrainGeometry.attributes.position as THREE.BufferAttribute
+    const terrainPosition = terrainGeometry.attributes.position as any
     for (let index = 0; index < terrainPosition.count; index += 1) {
       const x = terrainPosition.getX(index)
       const z = terrainPosition.getY(index)
@@ -572,9 +574,10 @@ const Home: NextPage = () => {
             targetModel.rotation.set(Math.PI / 2, Math.PI, 0)
             clearAnchor(targetVisual)
             targetVisual.add(targetModel)
+            setAircraftModelReady(true)
           },
           undefined,
-          () => undefined
+          () => setAircraftModelReady(false)
         )
 
         loader.load(
@@ -588,17 +591,20 @@ const Home: NextPage = () => {
             const missileBox = new THREE.Box3().setFromObject(missileModel)
             const missileSize = new THREE.Vector3()
             missileBox.getSize(missileSize)
-            const missileScale = 2.8 / Math.max(missileSize.x, missileSize.y, missileSize.z, 1)
+            const missileScale = 6.2 / Math.max(missileSize.x, missileSize.y, missileSize.z, 1)
             missileModel.scale.setScalar(missileScale)
             missileModel.rotation.set(Math.PI / 2, 0, Math.PI)
             clearAnchor(missileVisual)
             missileVisual.add(missileModel)
+            setMissileModelReady(true)
           },
           undefined,
-          () => undefined
+          () => setMissileModelReady(false)
         )
       } catch {
         // 加载失败时保持内置简模，保证场景可运行。
+        setAircraftModelReady(false)
+        setMissileModelReady(false)
       }
     }
     loadRealModels()
@@ -695,7 +701,7 @@ const Home: NextPage = () => {
       }
 
       if (missileActive && missileRoute) {
-        missileProgress = Math.min(1, missileProgress + 0.023)
+        missileProgress = Math.min(1, missileProgress + 0.0185)
         const missilePosition = missileRoute.getPointAt(missileProgress)
         missileTangent = missileRoute.getTangentAt(missileProgress)
         orientObject(missile, missilePosition, missileTangent)
@@ -753,11 +759,18 @@ const Home: NextPage = () => {
           .add(new THREE.Vector3(0, 2.4, 0))
         desiredLookAt.copy(attackerJet.position).add(attackerTangent.clone().multiplyScalar(12))
       } else if (missileActive) {
+        const right = new THREE.Vector3().crossVectors(missileTangent, new THREE.Vector3(0, 1, 0))
+        if (right.lengthSq() < 0.0001) {
+          right.set(1, 0, 0)
+        } else {
+          right.normalize()
+        }
         desiredCameraPosition
           .copy(missile.position)
-          .add(missileTangent.clone().multiplyScalar(-4))
-          .add(new THREE.Vector3(0, 1.2, 0))
-        desiredLookAt.copy(missile.position).add(missileTangent.clone().multiplyScalar(8))
+          .add(missileTangent.clone().multiplyScalar(-2.8))
+          .add(right.multiplyScalar(2.2))
+          .add(new THREE.Vector3(0, 0.9, 0))
+        desiredLookAt.copy(missile.position).add(missileTangent.clone().multiplyScalar(6.5))
       } else {
         desiredCameraPosition
           .copy(attackerJet.position)
@@ -884,6 +897,12 @@ const Home: NextPage = () => {
                 <li key={event}>{event}</li>
               ))}
             </ul>
+            <div className={styles.effectHint}>
+              飞机模型状态：{aircraftModelReady ? '真实 GLB 已加载' : '回退简模（加载中/失败）'}
+            </div>
+            <div className={styles.effectHint}>
+              导弹模型状态：{missileModelReady ? '真实 GLB 已加载' : '回退简模（加载中/失败）'}
+            </div>
             <div className={styles.effectHint}>
               已启用：地表多地形 / 真实导弹模型 / 高空云层 / 命中特效
             </div>
