@@ -1,63 +1,915 @@
 import type { NextPage } from 'next'
 import Head from 'next/head'
+import { useEffect, useRef, useState } from 'react'
+import * as THREE from 'three'
+import styles from '../styles/MilitarySituation.module.css'
+
+type CameraMode = 'strategic' | 'aircraft' | 'missile'
+
+type FlightMarker = {
+  progress: number
+  speed: number
+  curve: any
+  mesh: any
+}
+
+type SmokeTrail = {
+  maxPoints: number
+  points: any
+  positions: any[]
+  buffer: Float32Array
+}
+
+const radarTracks = [
+  { name: 'EAGLE-01', status: '森林上空巡航', confidence: '99%' },
+  { name: 'HAWK-12', status: '海岸线压制', confidence: '96%' },
+  { name: 'ORBIT-07', status: '高空云层侦察', confidence: '95%' },
+  { name: 'GUARD-22', status: '末段拦截', confidence: '98%' },
+]
+
+const battleMetrics = [
+  { label: '地形覆盖', value: '森林/海域/高空云' },
+  { label: '导弹模型', value: '高精度 GLB' },
+  { label: '目标锁定', value: '43 / 45' },
+  { label: '实时追踪', value: '3 视角' },
+]
+
+const strategicEvents = [
+  '已切换地表多地形战场：森林、海面与高空云层同步渲染。',
+  '导弹与飞机使用真实 GLB 模型，轨迹姿态由曲线切线驱动。',
+  '导弹末段制导触发爆闪、冲击环和火花散射效果。',
+]
+
+const terrainHeightAt = (x: number, z: number) => {
+  const rolling = Math.sin(x * 0.07) * 2.1 + Math.cos(z * 0.06) * 1.6
+  const details = Math.sin((x + z) * 0.12) * 0.85 + Math.cos((x - z) * 0.08) * 0.65
+  return rolling + details
+}
+
+const createSoftCircleTexture = (size: number, color: string, alphaScale: number) => {
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return null
+  }
+
+  const gradient = context.createRadialGradient(
+    size * 0.5,
+    size * 0.5,
+    size * 0.1,
+    size * 0.5,
+    size * 0.5,
+    size * 0.5
+  )
+  gradient.addColorStop(0, `${color}${Math.round(alphaScale * 255).toString(16).padStart(2, '0')}`)
+  gradient.addColorStop(0.5, `${color}${Math.round(alphaScale * 125).toString(16).padStart(2, '0')}`)
+  gradient.addColorStop(1, `${color}00`)
+
+  context.clearRect(0, 0, size, size)
+  context.fillStyle = gradient
+  context.fillRect(0, 0, size, size)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  return texture
+}
+
+const createFallbackAircraft = (color: number) => {
+  const aircraft = new THREE.Group()
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.07, 0.52, 12),
+    new THREE.MeshStandardMaterial({ color, metalness: 0.3, roughness: 0.45 })
+  )
+  const wing = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.016, 0.11),
+    new THREE.MeshStandardMaterial({ color: 0xd8e8f8, metalness: 0.25, roughness: 0.58 })
+  )
+  const tail = new THREE.Mesh(
+    new THREE.BoxGeometry(0.18, 0.012, 0.07),
+    new THREE.MeshStandardMaterial({ color: 0xd8e8f8, metalness: 0.2, roughness: 0.6 })
+  )
+  wing.position.y = -0.03
+  tail.position.y = -0.22
+  aircraft.add(body, wing, tail)
+  return aircraft
+}
+
+const createFallbackMissile = () => {
+  const missile = new THREE.Group()
+  const shell = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.024, 0.028, 0.42, 12),
+    new THREE.MeshStandardMaterial({ color: 0xe8e8eb, metalness: 0.55, roughness: 0.34 })
+  )
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.028, 0.11, 12),
+    new THREE.MeshStandardMaterial({ color: 0xff7b5c, metalness: 0.18, roughness: 0.52 })
+  )
+  head.position.y = 0.26
+  missile.add(shell, head)
+  return missile
+}
+
+const createSmokeTrail = (
+  scene: any,
+  color: number,
+  size: number,
+  maxPoints: number,
+  smokeMap: any
+): SmokeTrail => {
+  const geometry = new THREE.BufferGeometry()
+  const buffer = new Float32Array(maxPoints * 3)
+  for (let index = 0; index < buffer.length; index += 1) {
+    buffer[index] = 999
+  }
+  geometry.setAttribute('position', new THREE.BufferAttribute(buffer, 3))
+
+  const material = new THREE.PointsMaterial({
+    color,
+    map: smokeMap || null,
+    size,
+    transparent: true,
+    opacity: 0.52,
+    depthWrite: false,
+    alphaTest: 0.03,
+    blending: THREE.NormalBlending,
+  })
+
+  const points = new THREE.Points(geometry, material)
+  scene.add(points)
+
+  return {
+    maxPoints,
+    points,
+    positions: [],
+    buffer,
+  }
+}
+
+const pushSmokePoint = (trail: SmokeTrail, point: any, jitter: number) => {
+  const jittered = point.clone()
+  jittered.x += (Math.random() - 0.5) * jitter
+  jittered.y += (Math.random() - 0.5) * jitter
+  jittered.z += (Math.random() - 0.5) * jitter
+  trail.positions.unshift(jittered)
+
+  if (trail.positions.length > trail.maxPoints) {
+    trail.positions.pop()
+  }
+
+  for (let index = 0; index < trail.maxPoints; index += 1) {
+    const offset = index * 3
+    const smokePoint = trail.positions[index]
+    if (smokePoint) {
+      trail.buffer[offset] = smokePoint.x
+      trail.buffer[offset + 1] = smokePoint.y
+      trail.buffer[offset + 2] = smokePoint.z
+    } else {
+      trail.buffer[offset] = 999
+      trail.buffer[offset + 1] = 999
+      trail.buffer[offset + 2] = 999
+    }
+  }
+  trail.points.geometry.attributes.position.needsUpdate = true
+}
+
+const orientObject = (object: any, position: any, tangent: any) => {
+  const forwardAxis = new THREE.Vector3(0, 1, 0)
+  const normalized = tangent.clone().normalize()
+  const quaternion = new THREE.Quaternion().setFromUnitVectors(forwardAxis, normalized)
+  object.position.copy(position)
+  object.quaternion.copy(quaternion)
+}
 
 const Home: NextPage = () => {
+  const [cameraMode, setCameraMode] = useState<CameraMode>('strategic')
+  const [aircraftModelReady, setAircraftModelReady] = useState(false)
+  const [missileModelReady, setMissileModelReady] = useState(false)
+  const sceneRef = useRef<HTMLDivElement>(null)
+  const cameraModeRef = useRef<CameraMode>('strategic')
+
+  useEffect(() => {
+    cameraModeRef.current = cameraMode
+  }, [cameraMode])
+
+  useEffect(() => {
+    const mountNode = sceneRef.current
+    if (!mountNode) {
+      return
+    }
+
+    let disposed = false
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(0x8aaccc)
+    scene.fog = new THREE.Fog(0x8ea7bb, 70, 210)
+
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      mountNode.clientWidth / mountNode.clientHeight,
+      0.1,
+      500
+    )
+    camera.position.set(0, 32, 78)
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    renderer.setSize(mountNode.clientWidth, mountNode.clientHeight)
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.18
+    mountNode.appendChild(renderer.domElement)
+
+    const hemiLight = new THREE.HemisphereLight(0x9cc5ea, 0x5d6f55, 0.88)
+    const sunLight = new THREE.DirectionalLight(0xfff3da, 1.25)
+    sunLight.position.set(36, 52, 18)
+    const fillLight = new THREE.DirectionalLight(0xb9d8ff, 0.35)
+    fillLight.position.set(-30, 18, -26)
+    const warningLight = new THREE.PointLight(0xff8459, 0.65, 130)
+    warningLight.position.set(12, 28, 16)
+    scene.add(hemiLight, sunLight, fillLight, warningLight)
+
+    const textureLoader = new THREE.TextureLoader()
+    const maxAnisotropy = renderer.capabilities.getMaxAnisotropy()
+    const terrainTexture = textureLoader.load('/textures/terrain_grass.jpg')
+    const waterNormals = textureLoader.load('/textures/water_normals.jpg')
+
+    ;[terrainTexture, waterNormals].forEach((texture) => {
+      texture.anisotropy = maxAnisotropy
+      texture.colorSpace = THREE.SRGBColorSpace
+      texture.wrapS = THREE.RepeatWrapping
+      texture.wrapT = THREE.RepeatWrapping
+    })
+    terrainTexture.repeat.set(24, 24)
+    waterNormals.repeat.set(8, 8)
+
+    const terrainGeometry = new THREE.PlaneGeometry(190, 190, 220, 220)
+    const terrainPosition = terrainGeometry.attributes.position as any
+    for (let index = 0; index < terrainPosition.count; index += 1) {
+      const x = terrainPosition.getX(index)
+      const z = terrainPosition.getY(index)
+      terrainPosition.setZ(index, terrainHeightAt(x, z))
+    }
+    terrainGeometry.computeVertexNormals()
+    terrainGeometry.rotateX(-Math.PI / 2)
+
+    const terrain = new THREE.Mesh(
+      terrainGeometry,
+      new THREE.MeshStandardMaterial({
+        map: terrainTexture,
+        roughness: 0.95,
+        metalness: 0.05,
+      })
+    )
+    terrain.position.y = -6
+    scene.add(terrain)
+
+    const sea = new THREE.Mesh(
+      new THREE.PlaneGeometry(110, 86, 1, 1),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x2b668f,
+        normalMap: waterNormals,
+        normalScale: new THREE.Vector2(0.8, 0.8),
+        roughness: 0.16,
+        metalness: 0.1,
+        clearcoat: 0.5,
+        transparent: true,
+        opacity: 0.78,
+      })
+    )
+    sea.rotation.x = -Math.PI / 2
+    sea.position.set(48, -4.8, -22)
+    scene.add(sea)
+
+    const treeTrunkGeometry = new THREE.CylinderGeometry(0.14, 0.19, 2.1, 8)
+    const treeTrunkMaterial = new THREE.MeshStandardMaterial({
+      color: 0x5f4028,
+      roughness: 0.92,
+      metalness: 0.02,
+    })
+    const treeCrownGeometry = new THREE.ConeGeometry(0.95, 2.8, 7)
+    const treeCrownMaterial = new THREE.MeshStandardMaterial({
+      color: 0x2f6f3b,
+      roughness: 0.88,
+      metalness: 0.03,
+    })
+    const treeCount = 360
+    const trunkInstances = new THREE.InstancedMesh(treeTrunkGeometry, treeTrunkMaterial, treeCount)
+    const crownInstances = new THREE.InstancedMesh(treeCrownGeometry, treeCrownMaterial, treeCount)
+    const tempMatrix = new THREE.Matrix4()
+    const tempPosition = new THREE.Vector3()
+    const tempQuaternion = new THREE.Quaternion()
+    const tempScale = new THREE.Vector3()
+    for (let index = 0; index < treeCount; index += 1) {
+      const x = THREE.MathUtils.randFloatSpread(170)
+      const z = THREE.MathUtils.randFloatSpread(170)
+      // 海面区域不种树，保留海湾地形。
+      if (x > 10 && z < 28) {
+        const fallbackX = x - 42
+        const fallbackZ = z + 34
+        tempPosition.set(fallbackX, terrainHeightAt(fallbackX, fallbackZ) - 6 + 1, fallbackZ)
+      } else {
+        tempPosition.set(x, terrainHeightAt(x, z) - 6 + 1, z)
+      }
+
+      tempQuaternion.setFromEuler(new THREE.Euler(0, Math.random() * Math.PI * 2, 0))
+      tempScale.setScalar(0.8 + Math.random() * 1.3)
+      tempMatrix.compose(tempPosition, tempQuaternion, tempScale)
+      trunkInstances.setMatrixAt(index, tempMatrix)
+
+      tempPosition.y += 1.95
+      tempScale.setScalar(0.7 + Math.random() * 0.8)
+      tempMatrix.compose(tempPosition, tempQuaternion, tempScale)
+      crownInstances.setMatrixAt(index, tempMatrix)
+    }
+    scene.add(trunkInstances, crownInstances)
+
+    const cloudTexture = createSoftCircleTexture(220, '#ffffff', 0.78)
+    const clouds: Array<{ sprite: any; speed: number }> = []
+    for (let index = 0; index < 34; index += 1) {
+      const cloud = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: cloudTexture || null,
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.35 + Math.random() * 0.2,
+          depthWrite: false,
+        })
+      )
+      cloud.position.set(THREE.MathUtils.randFloatSpread(200), 24 + Math.random() * 12, THREE.MathUtils.randFloatSpread(200))
+      const cloudSize = 9 + Math.random() * 15
+      cloud.scale.set(cloudSize * 1.8, cloudSize, 1)
+      scene.add(cloud)
+      clouds.push({
+        sprite: cloud,
+        speed: 0.03 + Math.random() * 0.05,
+      })
+    }
+
+    const cloudBand = new THREE.Mesh(
+      new THREE.PlaneGeometry(220, 220, 1, 1),
+      new THREE.MeshBasicMaterial({
+        color: 0xe9f4ff,
+        transparent: true,
+        opacity: 0.18,
+        depthWrite: false,
+      })
+    )
+    cloudBand.rotation.x = -Math.PI / 2
+    cloudBand.position.y = 31
+    scene.add(cloudBand)
+
+    const targetCoordinates = [
+      new THREE.Vector3(-62, 16, -18),
+      new THREE.Vector3(-28, 22, 24),
+      new THREE.Vector3(6, 19, 10),
+      new THREE.Vector3(38, 21, -14),
+      new THREE.Vector3(66, 17, 21),
+      new THREE.Vector3(20, 16, 46),
+      new THREE.Vector3(-36, 20, 30),
+    ]
+
+    const targets: any[] = []
+    targetCoordinates.forEach((target, index) => {
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.055, 18, 18),
+        new THREE.MeshStandardMaterial({
+          color: index % 2 === 0 ? 0x00ffd5 : 0xff6b73,
+          emissive: index % 2 === 0 ? 0x007f6b : 0x7f2329,
+          emissiveIntensity: 1.1,
+        })
+      )
+      marker.position.copy(target)
+      scene.add(marker)
+      targets.push(marker)
+    })
+
+    const attackerPath = new THREE.CatmullRomCurve3(targetCoordinates, true)
+    const targetPath = new THREE.CatmullRomCurve3(
+      [
+        new THREE.Vector3(-58, 19, 52),
+        new THREE.Vector3(-20, 24, 26),
+        new THREE.Vector3(12, 18, 2),
+        new THREE.Vector3(44, 22, 28),
+        new THREE.Vector3(70, 16, -6),
+        new THREE.Vector3(22, 20, -32),
+        new THREE.Vector3(-26, 17, -40),
+      ],
+      true
+    )
+
+    const attackerRoute = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(attackerPath.getPoints(240)),
+      new THREE.LineBasicMaterial({ color: 0x4ce7ff, transparent: true, opacity: 0.62 })
+    )
+    const targetRoute = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(targetPath.getPoints(240)),
+      new THREE.LineBasicMaterial({ color: 0xff7c82, transparent: true, opacity: 0.6 })
+    )
+    scene.add(attackerRoute, targetRoute)
+
+    const attackerJet = new THREE.Group()
+    const targetJet = new THREE.Group()
+    const missile = new THREE.Group()
+    missile.visible = false
+    scene.add(attackerJet, targetJet, missile)
+
+    const attackerVisual = new THREE.Group()
+    const targetVisual = new THREE.Group()
+    const missileVisual = new THREE.Group()
+    attackerJet.add(attackerVisual)
+    targetJet.add(targetVisual)
+    missile.add(missileVisual)
+
+    attackerVisual.add(createFallbackAircraft(0x56d7ff))
+    targetVisual.add(createFallbackAircraft(0xff6e76))
+    missileVisual.add(createFallbackMissile())
+
+    const targetBeacon = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xff5b6d, transparent: true, opacity: 0.9 })
+    )
+    targetBeacon.position.set(0, 0.22, 0)
+    targetJet.add(targetBeacon)
+
+    const smokeMap = createSoftCircleTexture(120, '#f6f8fb', 0.9)
+    const attackerSmoke = createSmokeTrail(scene, 0xd8e2ea, 0.9, 96, smokeMap)
+    const targetSmoke = createSmokeTrail(scene, 0xe5cfd4, 0.85, 96, smokeMap)
+    const missileSmoke = createSmokeTrail(scene, 0xdbe2e9, 0.75, 84, smokeMap)
+
+    const missileTrack = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineDashedMaterial({
+        color: 0xffd36d,
+        dashSize: 0.18,
+        gapSize: 0.08,
+        transparent: true,
+        opacity: 0.88,
+      })
+    )
+    scene.add(missileTrack)
+
+    const impactRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.17, 0.028, 16, 36),
+      new THREE.MeshBasicMaterial({ color: 0xffcd7b, transparent: true, opacity: 0 })
+    )
+    impactRing.visible = false
+    scene.add(impactRing)
+
+    const impactFlash = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0xffefc1, transparent: true, opacity: 0 })
+    )
+    impactFlash.visible = false
+    scene.add(impactFlash)
+
+    const sparkMaterials: any[] = []
+    const sparks: Array<{ mesh: any; velocity: any }> = []
+    for (let index = 0; index < 22; index += 1) {
+      const sparkMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffa45d,
+        transparent: true,
+        opacity: 0,
+      })
+      const spark = new THREE.Mesh(new THREE.SphereGeometry(0.013, 8, 8), sparkMaterial)
+      spark.visible = false
+      scene.add(spark)
+      sparkMaterials.push(sparkMaterial)
+      sparks.push({ mesh: spark, velocity: new THREE.Vector3() })
+    }
+
+    const routeMarkers: FlightMarker[] = []
+    for (let index = 0; index < 3; index += 1) {
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.04, 14, 14),
+        new THREE.MeshStandardMaterial({
+          color: 0xfff38a,
+          emissive: 0xffb347,
+          emissiveIntensity: 1.1,
+        })
+      )
+      scene.add(marker)
+      routeMarkers.push({
+        progress: Math.random(),
+        speed: 0.0015 + index * 0.00024,
+        curve: attackerPath,
+        mesh: marker,
+      })
+    }
+
+    const desiredCameraPosition = new THREE.Vector3(0, 32, 78)
+    const desiredLookAt = new THREE.Vector3(0, 6, 0)
+    let attackerProgress = 0.11
+    let targetProgress = 0.56
+    let missileProgress = 0
+    let missileRoute: any = null
+    let missileActive = false
+    let missileCooldown = 80
+    let impactProgress = 1
+    let attackerTangent = new THREE.Vector3(0, 1, 0)
+    let targetTangent = new THREE.Vector3(0, 1, 0)
+    let missileTangent = new THREE.Vector3(0, 1, 0)
+
+    const clearAnchor = (anchor: any) => {
+      while (anchor.children.length > 0) {
+        anchor.remove(anchor.children[0])
+      }
+    }
+
+    const normalizeModelMaterials = (model: any) => {
+      model.traverse((child: any) => {
+        if (child.isMesh && child.material) {
+          child.castShadow = false
+          child.receiveShadow = true
+          const material = child.material
+          if (Array.isArray(material)) {
+            material.forEach((inner) => {
+              if (inner && inner.metalness !== undefined) {
+                inner.metalness = Math.min(0.75, inner.metalness + 0.08)
+              }
+              if (inner && inner.roughness !== undefined) {
+                inner.roughness = Math.max(0.2, inner.roughness - 0.06)
+              }
+            })
+          } else {
+            if (material.metalness !== undefined) {
+              material.metalness = Math.min(0.75, material.metalness + 0.08)
+            }
+            if (material.roughness !== undefined) {
+              material.roughness = Math.max(0.2, material.roughness - 0.06)
+            }
+          }
+        }
+      })
+    }
+
+    const loadRealModels = async () => {
+      try {
+        const loaderModule = await import('three/examples/jsm/loaders/GLTFLoader.js')
+        if (disposed) {
+          return
+        }
+        const loader = new (loaderModule as any).GLTFLoader()
+
+        loader.load(
+          '/models/aircraft.glb',
+          (gltf: any) => {
+            if (disposed) {
+              return
+            }
+            const attackerModel = gltf.scene
+            normalizeModelMaterials(attackerModel)
+            const attackerBox = new THREE.Box3().setFromObject(attackerModel)
+            const attackerSize = new THREE.Vector3()
+            attackerBox.getSize(attackerSize)
+            const aircraftScale = 3.8 / Math.max(attackerSize.x, attackerSize.y, attackerSize.z, 1)
+            attackerModel.scale.setScalar(aircraftScale)
+            attackerModel.rotation.set(Math.PI / 2, Math.PI, 0)
+            clearAnchor(attackerVisual)
+            attackerVisual.add(attackerModel)
+
+            const targetModel = gltf.scene.clone(true)
+            normalizeModelMaterials(targetModel)
+            targetModel.scale.setScalar(aircraftScale)
+            targetModel.rotation.set(Math.PI / 2, Math.PI, 0)
+            clearAnchor(targetVisual)
+            targetVisual.add(targetModel)
+            setAircraftModelReady(true)
+          },
+          undefined,
+          () => setAircraftModelReady(false)
+        )
+
+        loader.load(
+          '/models/missile.glb',
+          (gltf: any) => {
+            if (disposed) {
+              return
+            }
+            const missileModel = gltf.scene
+            normalizeModelMaterials(missileModel)
+            const missileBox = new THREE.Box3().setFromObject(missileModel)
+            const missileSize = new THREE.Vector3()
+            missileBox.getSize(missileSize)
+            const missileScale = 6.2 / Math.max(missileSize.x, missileSize.y, missileSize.z, 1)
+            missileModel.scale.setScalar(missileScale)
+            missileModel.rotation.set(Math.PI / 2, 0, Math.PI)
+            clearAnchor(missileVisual)
+            missileVisual.add(missileModel)
+            setMissileModelReady(true)
+          },
+          undefined,
+          () => setMissileModelReady(false)
+        )
+      } catch {
+        // 加载失败时保持内置简模，保证场景可运行。
+        setAircraftModelReady(false)
+        setMissileModelReady(false)
+      }
+    }
+    loadRealModels()
+
+    const triggerImpact = (position: any) => {
+      impactProgress = 0
+      impactRing.visible = true
+      impactFlash.visible = true
+      impactRing.position.copy(position)
+      impactFlash.position.copy(position)
+      impactRing.scale.setScalar(1)
+      impactFlash.scale.setScalar(1)
+      ;(impactRing.material as any).opacity = 0.95
+      ;(impactFlash.material as any).opacity = 0.95
+
+      sparks.forEach((spark) => {
+        spark.mesh.visible = true
+        spark.mesh.position.copy(position)
+        spark.velocity.set(
+          (Math.random() - 0.5) * 0.11,
+          (Math.random() - 0.5) * 0.11,
+          (Math.random() - 0.5) * 0.11
+        )
+      })
+    }
+
+    let animationFrame = 0
+    const animate = () => {
+      animationFrame = window.requestAnimationFrame(animate)
+
+      waterNormals.offset.x += 0.00055
+      waterNormals.offset.y += 0.00035
+      cloudBand.rotation.z += 0.0001
+      clouds.forEach((cloud) => {
+        cloud.sprite.position.x += cloud.speed
+        if (cloud.sprite.position.x > 112) {
+          cloud.sprite.position.x = -112
+        }
+      })
+
+      routeMarkers.forEach((flight) => {
+        flight.progress = (flight.progress + flight.speed) % 1
+        flight.mesh.position.copy(flight.curve.getPointAt(flight.progress))
+      })
+
+      attackerProgress = (attackerProgress + 0.00115) % 1
+      targetProgress = (targetProgress + 0.00102) % 1
+
+      const attackerPosition = attackerPath.getPointAt(attackerProgress)
+      const targetPosition = targetPath.getPointAt(targetProgress)
+      attackerTangent = attackerPath.getTangentAt(attackerProgress)
+      targetTangent = targetPath.getTangentAt(targetProgress)
+
+      orientObject(attackerJet, attackerPosition, attackerTangent)
+      orientObject(targetJet, targetPosition, targetTangent)
+      attackerJet.scale.setScalar(1.02)
+      targetJet.scale.setScalar(0.95)
+
+      pushSmokePoint(
+        attackerSmoke,
+        attackerPosition.clone().add(attackerTangent.clone().multiplyScalar(-0.25)),
+        0.07
+      )
+      pushSmokePoint(
+        targetSmoke,
+        targetPosition.clone().add(targetTangent.clone().multiplyScalar(-0.2)),
+        0.065
+      )
+
+      if (!missileActive) {
+        missileCooldown -= 1
+        if (missileCooldown <= 0) {
+          const launchPoint = attackerPosition.clone()
+          const targetPoint = targetPosition.clone()
+          const control = launchPoint
+            .clone()
+            .add(targetPoint)
+            .multiplyScalar(0.5)
+            .normalize()
+            .multiplyScalar(3.45)
+            .add(new THREE.Vector3(0, 0.9, 0))
+
+          missileRoute = new THREE.QuadraticBezierCurve3(launchPoint, control, targetPoint)
+          missileProgress = 0
+          missileActive = true
+          missile.visible = true
+          missileTrack.visible = true
+
+          const routePoints = missileRoute.getPoints(140)
+          missileTrack.geometry.dispose()
+          missileTrack.geometry = new THREE.BufferGeometry().setFromPoints(routePoints)
+          ;(missileTrack as any).computeLineDistances()
+        }
+      }
+
+      if (missileActive && missileRoute) {
+        missileProgress = Math.min(1, missileProgress + 0.0185)
+        const missilePosition = missileRoute.getPointAt(missileProgress)
+        missileTangent = missileRoute.getTangentAt(missileProgress)
+        orientObject(missile, missilePosition, missileTangent)
+
+        pushSmokePoint(
+          missileSmoke,
+          missilePosition.clone().add(missileTangent.clone().multiplyScalar(-0.16)),
+          0.045
+        )
+
+        if (missileProgress >= 1) {
+          missileActive = false
+          missile.visible = false
+          missileCooldown = 165
+          triggerImpact(targetPosition)
+          missileTrack.visible = false
+          missileTrack.geometry.dispose()
+          missileTrack.geometry = new THREE.BufferGeometry().setFromPoints([targetPosition, targetPosition])
+        }
+      }
+
+      if (impactProgress < 1) {
+        impactProgress += 0.034
+        impactRing.scale.setScalar(1 + impactProgress * 5.8)
+        impactFlash.scale.setScalar(1 + impactProgress * 3.9)
+        ;(impactRing.material as any).opacity = Math.max(0, 0.95 - impactProgress * 1.2)
+        ;(impactFlash.material as any).opacity = Math.max(0, 0.95 - impactProgress * 1.55)
+        sparks.forEach((spark, index) => {
+          spark.mesh.position.add(spark.velocity)
+          spark.velocity.multiplyScalar(0.92)
+          sparkMaterials[index].opacity = Math.max(0, 0.88 - impactProgress * 1.1)
+        })
+      } else if (impactRing.visible) {
+        impactRing.visible = false
+        impactFlash.visible = false
+        sparks.forEach((spark, index) => {
+          spark.mesh.visible = false
+          sparkMaterials[index].opacity = 0
+        })
+      }
+
+      targets.forEach((target, index) => {
+        const pulse = 1 + Math.sin(Date.now() * 0.004 + index) * 0.2
+        target.scale.setScalar(pulse)
+      })
+
+      const mode = cameraModeRef.current
+      if (mode === 'strategic') {
+        desiredCameraPosition.set(0, 34, 82)
+        desiredLookAt.set(0, 7, 0)
+      } else if (mode === 'aircraft') {
+        desiredCameraPosition
+          .copy(attackerJet.position)
+          .add(attackerTangent.clone().multiplyScalar(-8))
+          .add(new THREE.Vector3(0, 2.4, 0))
+        desiredLookAt.copy(attackerJet.position).add(attackerTangent.clone().multiplyScalar(12))
+      } else if (missileActive) {
+        const right = new THREE.Vector3().crossVectors(missileTangent, new THREE.Vector3(0, 1, 0))
+        if (right.lengthSq() < 0.0001) {
+          right.set(1, 0, 0)
+        } else {
+          right.normalize()
+        }
+        desiredCameraPosition
+          .copy(missile.position)
+          .add(missileTangent.clone().multiplyScalar(-2.8))
+          .add(right.multiplyScalar(2.2))
+          .add(new THREE.Vector3(0, 0.9, 0))
+        desiredLookAt.copy(missile.position).add(missileTangent.clone().multiplyScalar(6.5))
+      } else {
+        desiredCameraPosition
+          .copy(attackerJet.position)
+          .add(attackerTangent.clone().multiplyScalar(-9))
+          .add(new THREE.Vector3(0, 2.4, 0))
+        desiredLookAt.copy(targetJet.position)
+      }
+
+      camera.position.lerp(desiredCameraPosition, 0.08)
+      camera.lookAt(desiredLookAt)
+      renderer.render(scene, camera)
+    }
+    animate()
+
+    const handleResize = () => {
+      camera.aspect = mountNode.clientWidth / mountNode.clientHeight
+      camera.updateProjectionMatrix()
+      renderer.setSize(mountNode.clientWidth, mountNode.clientHeight)
+    }
+    window.addEventListener('resize', handleResize)
+
+    return () => {
+      disposed = true
+      window.removeEventListener('resize', handleResize)
+      window.cancelAnimationFrame(animationFrame)
+      scene.traverse((object: any) => {
+        if (object instanceof THREE.Mesh || object instanceof THREE.Points || object instanceof THREE.Line) {
+          object.geometry.dispose()
+          if (Array.isArray(object.material)) {
+            object.material.forEach((material: { dispose: () => void }) => material.dispose())
+          } else if (object.material) {
+            object.material.dispose()
+          }
+        }
+      })
+      if (cloudTexture) {
+        cloudTexture.dispose()
+      }
+      if (smokeMap) {
+        smokeMap.dispose()
+      }
+      renderer.dispose()
+      mountNode.removeChild(renderer.domElement)
+    }
+  }, [])
+
   return (
     <>
       <Head>
-        <title>Create Next App</title>
-        <meta name="description" content="Generated by create next app" />
-        <link rel="icon" href="/favicon.ico" />
+        <title>三维态势指挥平台</title>
+        <meta name="description" content="军事三维态势可视化指挥网页" />
       </Head>
-      <header>
-    <svg width="105" height="25" viewBox="0 0 105 25" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <g clipPath="url(#clip0_103_2)">
-            <circle cx="12.0382" cy="12.5" r="10.4777" fill="white" stroke="#CC0000" strokeWidth="3.12102"/>
-            <circle cx="16.9427" cy="14.7293" r="12.0382" fill="#CC0000"/>
-        </g>
-        <path d="M36.655 15.2204V18H35.2402C32.8545 18 31.6617 16.8182 31.6617 14.4547V11.3755H30.5132V8.6625H31.6617V6.39886H34.9406V8.6625H36.6384V11.3755H34.9406V14.5047C34.9406 14.7599 34.9961 14.943 35.1071 15.0539C35.2291 15.1649 35.4289 15.2204 35.7063 15.2204H36.655ZM47.0727 13.2231C47.0727 13.4783 47.0561 13.7335 47.0228 13.9887H40.8477C40.881 14.4991 41.0197 14.882 41.2638 15.1372C41.519 15.3813 41.8408 15.5033 42.2292 15.5033C42.7729 15.5033 43.1613 15.2592 43.3943 14.771H46.873C46.7287 15.4146 46.4458 15.9916 46.0241 16.502C45.6135 17.0013 45.092 17.3953 44.4595 17.6838C43.827 17.9723 43.128 18.1165 42.3623 18.1165C41.4413 18.1165 40.6202 17.9223 39.899 17.534C39.1888 17.1456 38.6284 16.5908 38.2179 15.8695C37.8184 15.1483 37.6187 14.2994 37.6187 13.3229C37.6187 12.3465 37.8184 11.5031 38.2179 10.793C38.6173 10.0717 39.1722 9.51691 39.8823 9.12854C40.6036 8.74017 41.4302 8.54599 42.3623 8.54599C43.2833 8.54599 44.0989 8.73462 44.8091 9.1119C45.5192 9.48917 46.074 10.0329 46.4735 10.743C46.873 11.4421 47.0727 12.2688 47.0727 13.2231ZM43.7438 12.4075C43.7438 12.008 43.6107 11.6973 43.3444 11.4754C43.078 11.2424 42.7452 11.1259 42.3457 11.1259C41.9462 11.1259 41.6189 11.2368 41.3637 11.4588C41.1085 11.6696 40.942 11.9858 40.8643 12.4075H43.7438ZM52.3858 18.1165C51.5425 18.1165 50.7879 17.9778 50.1221 17.7004C49.4675 17.4119 48.9459 17.0235 48.5576 16.5353C48.1803 16.036 47.9695 15.4756 47.9251 14.8542H51.0875C51.1319 15.1538 51.2706 15.3868 51.5036 15.5533C51.7366 15.7197 52.0251 15.8029 52.3691 15.8029C52.6354 15.8029 52.8463 15.7475 53.0016 15.6365C53.157 15.5255 53.2346 15.3813 53.2346 15.2037C53.2346 14.9707 53.107 14.7987 52.8518 14.6878C52.5966 14.5768 52.1749 14.4547 51.5868 14.3216C50.9211 14.1884 50.3662 14.0386 49.9224 13.8722C49.4785 13.7057 49.0902 13.4339 48.7573 13.0566C48.4355 12.6793 48.2746 12.1689 48.2746 11.5253C48.2746 10.9705 48.4244 10.4712 48.724 10.0273C49.0236 9.57239 49.4619 9.21176 50.0389 8.94545C50.627 8.67914 51.3316 8.54599 52.1527 8.54599C53.3733 8.54599 54.3332 8.84559 55.0322 9.44479C55.7313 10.044 56.1363 10.8318 56.2473 11.8083H53.3012C53.2457 11.5087 53.1126 11.2812 52.9017 11.1259C52.702 10.9594 52.4302 10.8762 52.0862 10.8762C51.8199 10.8762 51.6146 10.9261 51.4703 11.026C51.3372 11.1259 51.2706 11.2646 51.2706 11.4421C51.2706 11.664 51.3982 11.836 51.6534 11.9581C51.9086 12.0691 52.3192 12.1856 52.8851 12.3076C53.562 12.4519 54.1223 12.6128 54.5662 12.7903C55.0211 12.9678 55.415 13.2563 55.7479 13.6558C56.0919 14.0442 56.2639 14.5768 56.2639 15.2537C56.2639 15.7974 56.103 16.2856 55.7812 16.7184C55.4705 17.1511 55.0211 17.4951 54.433 17.7503C53.856 17.9945 53.1736 18.1165 52.3858 18.1165ZM61.1301 9.96076C61.3853 9.51691 61.7459 9.17293 62.2119 8.92881C62.678 8.6736 63.2272 8.54599 63.8597 8.54599C64.6032 8.54599 65.2745 8.74017 65.8737 9.12854C66.484 9.51691 66.9611 10.0717 67.3051 10.793C67.6602 11.5142 67.8377 12.3576 67.8377 13.3229C67.8377 14.2883 67.6602 15.1372 67.3051 15.8695C66.9611 16.5908 66.484 17.1456 65.8737 17.534C65.2745 17.9223 64.6032 18.1165 63.8597 18.1165C63.2272 18.1165 62.678 17.9945 62.2119 17.7503C61.7459 17.4951 61.3853 17.1456 61.1301 16.7017V18H57.8678V5.68315H61.1301V9.96076ZM64.5255 13.3229C64.5255 12.7126 64.3591 12.241 64.0262 11.9082C63.7044 11.5642 63.3049 11.3922 62.8278 11.3922C62.3506 11.3922 61.9456 11.5642 61.6127 11.9082C61.2909 12.2521 61.1301 12.7237 61.1301 13.3229C61.1301 13.9332 61.2909 14.4104 61.6127 14.7543C61.9456 15.0983 62.3506 15.2703 62.8278 15.2703C63.3049 15.2703 63.7044 15.0983 64.0262 14.7543C64.3591 14.3993 64.5255 13.9221 64.5255 13.3229ZM78.1021 13.2231C78.1021 13.4783 78.0855 13.7335 78.0522 13.9887H71.8771C71.9104 14.4991 72.0491 14.882 72.2932 15.1372C72.5484 15.3813 72.8702 15.5033 73.2586 15.5033C73.8023 15.5033 74.1907 15.2592 74.4237 14.771H77.9024C77.7581 15.4146 77.4752 15.9916 77.0535 16.502C76.643 17.0013 76.1214 17.3953 75.489 17.6838C74.8565 17.9723 74.1574 18.1165 73.3918 18.1165C72.4708 18.1165 71.6496 17.9223 70.9284 17.534C70.2182 17.1456 69.6579 16.5908 69.2473 15.8695C68.8478 15.1483 68.6481 14.2994 68.6481 13.3229C68.6481 12.3465 68.8478 11.5031 69.2473 10.793C69.6468 10.0717 70.2016 9.51691 70.9117 9.12854C71.633 8.74017 72.4597 8.54599 73.3918 8.54599C74.3128 8.54599 75.1283 8.73462 75.8385 9.1119C76.5486 9.48917 77.1035 10.0329 77.5029 10.743C77.9024 11.4421 78.1021 12.2688 78.1021 13.2231ZM74.7732 12.4075C74.7732 12.008 74.6401 11.6973 74.3738 11.4754C74.1075 11.2424 73.7746 11.1259 73.3751 11.1259C72.9757 11.1259 72.6483 11.2368 72.3931 11.4588C72.1379 11.6696 71.9714 11.9858 71.8938 12.4075H74.7732ZM82.6995 10.3103C83.0657 9.77767 83.5095 9.35601 84.031 9.04532C84.5526 8.73462 85.1129 8.57928 85.7121 8.57928V12.058H84.7967C84.0865 12.058 83.5594 12.1967 83.2155 12.4741C82.8715 12.7515 82.6995 13.2342 82.6995 13.9221V18H79.4372V8.6625H82.6995V10.3103ZM90.1439 10.3103C90.5101 9.77767 90.954 9.35601 91.4755 9.04532C91.997 8.73462 92.5574 8.57928 93.1566 8.57928V12.058H92.2411C91.531 12.058 91.0039 12.1967 90.6599 12.4741C90.3159 12.7515 90.1439 13.2342 90.1439 13.9221V18H86.8816V8.6625H90.1439V10.3103ZM104.379 8.6625L98.4539 22.4441H94.9087L97.139 17.6005L93.3108 8.6625H96.9393L98.9033 13.9554L100.801 8.6625H104.379Z" fill="black"/>
-        <defs>
-            <clipPath id="clip0_103_2">
-                <rect y="0.461761" width="24.0764" height="24.0764" rx="12.0382" fill="white"/>
-            </clipPath>
-        </defs>
-    </svg>
-    <a href="https://www.youtube.com/redirect?q=http://tesberry/">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M15 3H21V9" stroke="black" strokeOpacity="0.9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M9 21H3V15" stroke="black" strokeOpacity="0.9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M21 3L14 10" stroke="black" strokeOpacity="0.9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M3 21L10 14" stroke="black" strokeOpacity="0.9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-    </a>
-</header>
+      <div className={styles.page}>
+        <div className={styles.topBar}>
+          <div>
+            <p className={styles.tag}>JOINT OPS / LIVE FEED</p>
+            <h1 className={styles.title}>三维态势联合作战指挥平台</h1>
+          </div>
+          <div className={styles.statusBox}>
+            <span className={styles.dot} />
+            全链路在线
+          </div>
+        </div>
+        <div className={styles.cameraSwitch}>
+          <button
+            className={cameraMode === 'strategic' ? styles.activeCameraButton : styles.cameraButton}
+            onClick={() => setCameraMode('strategic')}
+            type="button"
+          >
+            全局视角
+          </button>
+          <button
+            className={cameraMode === 'aircraft' ? styles.activeCameraButton : styles.cameraButton}
+            onClick={() => setCameraMode('aircraft')}
+            type="button"
+          >
+            飞机跟随
+          </button>
+          <button
+            className={cameraMode === 'missile' ? styles.activeCameraButton : styles.cameraButton}
+            onClick={() => setCameraMode('missile')}
+            type="button"
+          >
+            导弹跟随
+          </button>
+        </div>
+        <div className={styles.layout}>
+          <aside className={styles.panel}>
+            <h2>雷达航迹</h2>
+            <ul className={styles.trackList}>
+              {radarTracks.map((track) => (
+                <li key={track.name}>
+                  <strong>{track.name}</strong>
+                  <span>{track.status}</span>
+                  <small>置信度 {track.confidence}</small>
+                </li>
+              ))}
+            </ul>
+          </aside>
 
-<main>
-    <nav>
-        <button>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <g clipPath="url(#clip0_103_9)">
-                    <path fillRule="evenodd" clipRule="evenodd" d="M19.4233 10.5587C16.8505 9.86057 14.3763 8.70803 11.5902 8.90377C9.40513 8.77897 7.37473 9.60777 5.27606 10.0899C4.35393 10.3022 3.1614 10.9512 2.56833 9.9027C1.94433 8.7987 3.07286 8.0147 3.82113 7.36403C4.58166 6.70324 5.0862 5.87123 5.7102 5.1187C7.63073 2.80404 11.4782 1.9027 14.6563 2.9859C16.5155 3.61897 18.1406 4.5267 19.1406 6.37417C19.5491 7.12883 20.4041 7.6275 20.9433 8.32937C21.3929 8.91284 21.8697 9.65257 21.3641 10.3934C20.8579 11.1363 20.0841 10.7379 19.4233 10.5587ZM21.011 14.8131C20.2462 16.6398 19.2072 18.3123 17.8467 19.7486C17.091 20.5464 16.1064 21.0083 14.9528 20.9667C14.2142 20.94 13.8062 20.6142 13.9534 19.5032C14.1358 17.6974 14.6894 15.7598 16.8051 14.7022C17.6835 14.2632 18.5432 13.7854 19.435 13.3763C19.9198 13.1539 20.4798 12.7171 20.9838 13.2227C21.4392 13.6803 21.2248 14.3027 21.011 14.8131ZM8.49047 20.9667C7.3374 21.0083 6.35234 20.5464 5.5966 19.7486C4.2366 18.3123 3.19767 16.6398 2.43234 14.8131C2.219 14.3027 2.00407 13.6803 2.46007 13.2227C2.96407 12.7171 3.52354 13.1539 4.00887 13.3763C4.90007 13.7854 5.76034 14.2632 6.6382 14.7022C8.75394 15.7598 9.30754 17.6974 9.48994 19.5032C9.63714 20.6142 9.22914 20.94 8.49047 20.9667ZM11.8856 -0.000244141C5.32129 -0.000244141 -0.000305176 5.32136 -0.000305176 11.8856C-0.000305176 18.4499 5.32129 23.7715 11.8856 23.7715C18.4498 23.7715 23.7714 18.4499 23.7714 11.8856C23.7714 5.32136 18.4498 -0.000244141 11.8856 -0.000244141Z" fill="black" fillOpacity="0.8"/>
-                </g>
-                <defs>
-                    <clipPath id="clip0_103_9">
-                        <rect width="24" height="24" fill="white"/>
-                    </clipPath>
-                </defs>
-            </svg>
-            Controls
-        </button>
-        <button>Customization</button>
-        <button>HDMI Input</button>
-        <button>Lights</button>
-        <button>Data / Stats</button>
-        <button>Network Settings</button>
-    </nav>
-    <article>
-        Content 1
-    </article>
-</main>
-</>
+          <section className={styles.sceneWrap}>
+            <div ref={sceneRef} className={styles.scene} />
+            <div className={styles.legend}>
+              <span>绿色地表: 森林丘陵</span>
+              <span>蓝色区域: 海面地形</span>
+              <span>白色云层: 高空云海</span>
+              <span>灰白粒子: 飞机与导弹尾烟</span>
+            </div>
+          </section>
+
+          <aside className={styles.panel}>
+            <h2>战场指标</h2>
+            <div className={styles.metricGrid}>
+              {battleMetrics.map((metric) => (
+                <div key={metric.label} className={styles.metricCard}>
+                  <p>{metric.label}</p>
+                  <strong>{metric.value}</strong>
+                </div>
+              ))}
+            </div>
+            <h3>态势播报</h3>
+            <ul className={styles.eventList}>
+              {strategicEvents.map((event) => (
+                <li key={event}>{event}</li>
+              ))}
+            </ul>
+            <div className={styles.effectHint}>
+              飞机模型状态：{aircraftModelReady ? '真实 GLB 已加载' : '回退简模（加载中/失败）'}
+            </div>
+            <div className={styles.effectHint}>
+              导弹模型状态：{missileModelReady ? '真实 GLB 已加载' : '回退简模（加载中/失败）'}
+            </div>
+            <div className={styles.effectHint}>
+              已启用：地表多地形 / 真实导弹模型 / 高空云层 / 命中特效
+            </div>
+          </aside>
+        </div>
+      </div>
+    </>
   )
 }
 
